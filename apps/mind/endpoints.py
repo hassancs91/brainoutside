@@ -1,4 +1,4 @@
-"""The brain's dumb read layer — six endpoints serving tier-snapshot bytes.
+"""The brain's dumb read layer — endpoints serving tier-snapshot bytes.
 
 Every endpoint (REST + MCP, one class each — the vendored registry):
 1. resolves the caller's tier from its API key's consumer profile
@@ -9,7 +9,10 @@ Every endpoint (REST + MCP, one class each — the vendored registry):
 4. emits a `read` Event with the entity ids served.
 
 `assemble-context` (M3.2) is the smart layer: same tier resolution and
-snapshot boundary, but a reader agent selects and assembles the context.
+snapshot boundary, but a deterministic reader selects and assembles the
+context (open, model-free). `get-protocol` teaches any consumer — any
+MCP/AI tool, not just one vendor's — the order and contract for using
+the brain's tools.
 """
 from __future__ import annotations
 
@@ -21,6 +24,42 @@ from apps.core.ctx import Ctx
 from apps.core.registry import Endpoint, endpoint
 from apps.events.models import emit
 from apps.mind import files, tiers
+
+PROTOCOL_TEXT = """# Brain MCP protocol
+
+The brain is a read-first system with one gated write path. Tools are
+tier-scoped: you only ever see and serve what your key is allowed to see.
+
+## Reading order
+
+1. **get-index** — start here. The tier-scoped index of the whole brain.
+2. **get-identity** — before any task in the owner's voice or context,
+   load the identity core (voice rules, beliefs, boundaries).
+3. **get-lens / list-notes / get-note / get-raw** — targeted retrieval.
+   list-notes filters by kind/topic/project; get-note returns one note's
+   full markdown; get-raw serves archived files only when a visible note
+   links them.
+4. **assemble-context** — for a task, ask the brain to assemble a
+   task-shaped context pack (identity + the right notes, VERBATIM quotes
+   preserved). Deterministic and open — no model required.
+
+## Writing
+
+5. **propose-feed** — the ONLY write path. It creates a pending proposal
+   in the human approval queue; nothing is written to the brain until the
+   operator approves. Always submit the real source (URL or pasted
+   content) plus guidance on what matters in it.
+
+## Rules for consumers
+
+- The brain returns data, not decisions: no model, no tokens, no
+  platform-specific metadata. Bring your own.
+- Tier is set by your key, never by a request parameter.
+- Read the identity core before voice/context work.
+- Never retry assemble-context aggressively — it is deterministic and
+  cheap, but a retry returns the same pack for the same task.
+- propose-feed is gated: a public-tier key is refused.
+"""
 
 
 def _tier(ctx: Ctx) -> str:
@@ -92,8 +131,33 @@ class Ping(Endpoint):
 
 
 @endpoint(
+    slug="get-protocol",
+    description=(
+        "How to use this brain's tools, in order — read before anything "
+        "else. Cross-tool and platform-neutral: works from any MCP/AI "
+        "consumer."
+    ),
+)
+class GetProtocol(Endpoint):
+    class Input(BaseModel):
+        pass
+
+    class Output(BaseModel):
+        protocol: str
+
+    async def run(self, inp: Input, ctx: Ctx) -> Output:
+        return await sync_to_async(self._work, thread_sensitive=True)(inp, ctx)
+
+    def _work(self, inp: Input, ctx: Ctx) -> Output:
+        return self.Output(protocol=PROTOCOL_TEXT)
+
+
+@endpoint(
     slug="get-index",
-    description="The brain's index, generated for your visibility tier. Read this first.",
+    description=(
+        "The brain's index, generated for your visibility tier. Read this "
+        "first — before any other tool — to see what the brain holds."
+    ),
 )
 class GetIndex(Endpoint):
     class Input(BaseModel):
@@ -118,7 +182,7 @@ class GetIndex(Endpoint):
     description=(
         "List brain entities visible to you, filterable by kind "
         "(take/story/lesson/fact/project/identity/catalog/lens), topic, "
-        "project, and status."
+        "project, and status. Use after get-index, before get-note."
     ),
 )
 class ListNotes(Endpoint):
@@ -189,7 +253,13 @@ class GetNote(Endpoint):
         return self.Output(tier=tier, entity_id=e.entity_id, path=e.path, content=content)
 
 
-@endpoint(slug="get-lens", description="A lens file — a named retrieval scope (topics, types, ceiling).")
+@endpoint(
+    slug="get-lens",
+    description=(
+        "A lens file — a named retrieval scope (topics, types, ceiling). "
+        "Pass a lens to assemble-context to scope the pack."
+    ),
+)
 class GetLens(Endpoint):
     class Input(BaseModel):
         name: str = Field(min_length=1, max_length=100, description="Lens name, e.g. 'self-hosting'.")
@@ -220,7 +290,11 @@ class IdentityFile(BaseModel):
 
 @endpoint(
     slug="get-identity",
-    description="The identity core visible at your tier — load before any voice/context task.",
+    description=(
+        "The identity core visible at your tier — voice rules, beliefs, "
+        "boundaries. Load before ANY task in the owner's voice or "
+        "context; it is the single source for how to sound like them."
+    ),
 )
 class GetIdentity(Endpoint):
     class Input(BaseModel):
@@ -254,8 +328,9 @@ class GetIdentity(Endpoint):
 @endpoint(
     slug="get-raw",
     description=(
-        "A raw/ archive file, reachable ONLY when a note visible to you links "
-        "it. Use for depth after reading the linking note."
+        "A raw/ archive file, reachable ONLY when a note visible to you "
+        "links it. Use for depth after reading the linking note; never "
+        "before."
     ),
 )
 class GetRaw(Endpoint):
@@ -288,11 +363,10 @@ class GetRaw(Endpoint):
 @endpoint(
     slug="assemble-context",
     description=(
-        "Smart reader: a Claude agent assembles a task-shaped context pack "
-        "from the mind at your tier — identity, the right notes, VERBATIM "
-        "quotes preserved. Returns the pack, exact entity ids used, gaps, "
-        "and token counts. Honest latency: 5-30 s per call; never retried "
-        "automatically."
+        "Smart reader: assembles a task-shaped context pack from the mind "
+        "at your tier — identity, the right notes, VERBATIM quotes "
+        "preserved. Deterministic and open (no model required). Returns "
+        "the pack and the exact entity ids it drew from."
     ),
 )
 class AssembleContext(Endpoint):
@@ -309,12 +383,9 @@ class AssembleContext(Endpoint):
         context_pack: str
         entity_ids_used: list[str]
         gaps: list[str]
-        tokens: dict
-        model: str
-        duration_ms: int | None
 
     async def run(self, inp: Input, ctx: Ctx) -> Output:
-        from apps.reader.services import reader, sdk_runner
+        from apps.reader.services import reader
 
         tier = await sync_to_async(_tier, thread_sensitive=True)(ctx)
         try:
@@ -323,12 +394,6 @@ class AssembleContext(Endpoint):
             )
         except reader.ReaderError as exc:
             raise ValueError(str(exc)) from exc
-        except sdk_runner.SdkRunnerError as exc:
-            raise ValueError(f"reader unavailable: {exc}") from exc
-        except reader.ReaderFailed as exc:
-            raise ValueError(
-                f"reader run failed ({exc}) — degraded mode, not retried automatically; try again"
-            ) from exc
         await sync_to_async(emit, thread_sensitive=True)(
             "read",
             consumer=_cred(ctx),
@@ -336,7 +401,6 @@ class AssembleContext(Endpoint):
             endpoint="assemble-context",
             tier=tier,
             lens=inp.lens or "",
-            operation_id=result["operation_id"],
             **_via(ctx),
         )
         return self.Output(
@@ -344,7 +408,4 @@ class AssembleContext(Endpoint):
             context_pack=result["context_pack"],
             entity_ids_used=result["entity_ids_used"],
             gaps=result["gaps"],
-            tokens=result["tokens"],
-            model=result["model"],
-            duration_ms=result["duration_ms"],
         )
