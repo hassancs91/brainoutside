@@ -23,7 +23,7 @@ from apps.brainconfig.nav import ops_context
 from apps.events.models import emit
 
 from .models import Feed
-from .services import diffview, feeder, intake, validator
+from .services import diffview, feeder, flush, intake, validator
 
 SOURCE_KINDS = ("yt", "blog", "x", "newsletter", "repo", "doc", "thought")
 
@@ -32,6 +32,19 @@ SOURCE_KINDS = ("yt", "blog", "x", "newsletter", "repo", "doc", "thought")
 @require_http_methods(["GET", "POST"])
 def queue(request):
     if request.method == "POST":
+        action = request.POST.get("action", "")
+        if action == "flush":
+            n = flush.flush_queue()
+            if n:
+                messages.success(
+                    request,
+                    f"Flushed {n} feed{'s' if n != 1 else ''} "
+                    "(failed / stuck captures rejected; ready-to-review left alone).",
+                )
+            else:
+                messages.info(request, "Nothing to flush — no failed or stuck captures.")
+            return redirect(request.path)
+
         try:
             feed = intake.propose(
                 channel="ui",
@@ -69,6 +82,7 @@ def queue(request):
     # Filters re-encoded WITHOUT `page`, so pager links compose as
     # "?{filter_qs}&page=N" and never carry a stale page number.
     filter_qs = urlencode({"status": f_status}) if f_status else ""
+    flushable_count = flush.flushable_queryset().count()
 
     return render(
         request,
@@ -79,6 +93,7 @@ def queue(request):
             "filter_qs": filter_qs,
             "total": Feed.objects.count(),
             "pending_count": Feed.objects.filter(status="pending").count(),
+            "flushable_count": flushable_count,
             "statuses": [s for s, _ in Feed.STATUSES],
             "f_status": f_status,
             "source_kinds": SOURCE_KINDS,
@@ -150,6 +165,27 @@ def _handle_action(request, feed: Feed) -> None:
             (messages.success if started else messages.error)(request, message)
         return
 
+    # Reject is allowed on pending OR failed: a terminal apply failure
+    # otherwise has no ops move, and a pending capture with no proposal
+    # never showed a Reject button (only Retry). Approve/extract/edit
+    # still require pending.
+    if action == "reject":
+        if feed.status not in ("pending", "failed"):
+            messages.error(request, f"Feed is {feed.status} — no further actions.")
+            return
+        reason = (request.POST.get("reason") or "").strip()
+        if not reason:
+            messages.error(request, "A reject reason is required.")
+            return
+        feed.status = "rejected"
+        feed.decided_at = timezone.now()
+        feed.decision_note = reason
+        feed.extract_queued_at = None
+        feed.save(update_fields=["status", "decided_at", "decision_note", "extract_queued_at"])
+        emit("feed", action="rejected", feed_id=feed.pk, source_id=feed.source_id, reason=reason)
+        messages.success(request, f"Feed {feed.source_id} rejected.")
+        return
+
     if feed.status != "pending":
         messages.error(request, f"Feed is {feed.status} — no further actions.")
         return
@@ -194,18 +230,6 @@ def _handle_action(request, feed: Feed) -> None:
             messages.success(request, "Edits saved — proposal passes rules 1-8; approve is enabled.")
         else:
             messages.error(request, f"Edits saved — {len(res.violations)} validation violation(s) remain.")
-
-    elif action == "reject":
-        reason = (request.POST.get("reason") or "").strip()
-        if not reason:
-            messages.error(request, "A reject reason is required.")
-            return
-        feed.status = "rejected"
-        feed.decided_at = timezone.now()
-        feed.decision_note = reason
-        feed.save(update_fields=["status", "decided_at", "decision_note"])
-        emit("feed", action="rejected", feed_id=feed.pk, source_id=feed.source_id, reason=reason)
-        messages.success(request, f"Feed {feed.source_id} rejected.")
 
     elif action == "approve":
         res = validator.validate_feed(feed)

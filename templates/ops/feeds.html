@@ -63,17 +63,42 @@
     enforced CSP (script-src 'self' 'nonce') drops it, so the old
     select changed nothing and the form had no other way to submit.
   {% endcomment %}
-  <form method="get" class="card mb-4 flex flex-wrap items-end gap-3 p-4">
-    <label class="text-sm">
-      <span class="mb-1 block text-xs text-muted">Status</span>
-      <select name="status" class="field-select">
-        <option value="">all</option>
-        {% for s in statuses %}<option value="{{ s }}" {% if s == f_status %}selected{% endif %}>{{ s }}</option>{% endfor %}
-      </select>
-    </label>
-    <button type="submit" class="btn-primary">Filter</button>
-    <a href="{% url 'brainconfig:feeds' %}" class="btn-ghost">Reset</a>
-  </form>
+  <div class="mb-4 flex flex-wrap items-end justify-between gap-3">
+    <form method="get" class="card flex flex-wrap items-end gap-3 p-4">
+      <label class="text-sm">
+        <span class="mb-1 block text-xs text-muted">Status</span>
+        <select name="status" class="field-select">
+          <option value="">all</option>
+          {% for s in statuses %}<option value="{{ s }}" {% if s == f_status %}selected{% endif %}>{{ s }}</option>{% endfor %}
+        </select>
+      </label>
+      <button type="submit" class="btn-primary">Filter</button>
+      <a href="{% url 'brainconfig:feeds' %}" class="btn-ghost">Reset</a>
+    </form>
+
+    {% comment %}
+      Confirm via Alpine (CSP forbids inline handlers). Soft-closes failed
+      apply rows and abandoned/errored pending captures; never touches a
+      proposal that is ready to review or an in-flight extraction.
+    {% endcomment %}
+    <form method="post" class="card flex flex-wrap items-center gap-3 p-4"
+          x-data
+          @submit="if (!confirm($refs.flushText.textContent.trim())) $event.preventDefault()">
+      {% csrf_token %}
+      <input type="hidden" name="action" value="flush" />
+      <span x-ref="flushText" class="hidden">
+        Reject {{ flushable_count }} failed or stuck feed{{ flushable_count|pluralize }}?
+        Ready-to-review proposals and in-flight extractions stay. This does not delete history — it marks them rejected.
+      </span>
+      <div class="text-xs text-muted max-w-xs">
+        Flush rejects failed apply rows and pending captures with no reviewable proposal
+        ({{ flushable_count }} ready).
+      </div>
+      <button type="submit" class="btn-danger" {% if flushable_count == 0 %}disabled{% endif %}>
+        Flush queue
+      </button>
+    </form>
+  </div>
 
   <div class="card table-wrap">
     <table class="table table-hover">

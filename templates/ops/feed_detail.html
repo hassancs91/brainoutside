@@ -292,8 +292,33 @@
             {% if feed.error %}Retry extraction{% else %}Run extraction{% endif %}
           </button>
         </form>
+        <form method="post" class="mt-4 flex min-w-40 max-w-lg flex-wrap items-center gap-2">
+          {% csrf_token %}
+          <input type="hidden" name="action" value="reject" />
+          <div class="min-w-0 grow">
+            <input type="text" name="reason" required placeholder="Reject reason (required)" class="field-input" />
+          </div>
+          <button type="submit" class="btn-danger-ghost">Reject</button>
+        </form>
       </div>
     {% endif %}
+  {% elif feed.status == "failed" %}
+    <div class="card mb-6">
+      <div class="card-header">
+        <h2 class="card-title">Failed</h2>
+        <span class="text-xs text-muted">terminal apply failure — reject to close, or flush from the queue</span>
+      </div>
+      <div class="card-body">
+        <form method="post" class="flex min-w-40 flex-wrap items-center gap-2">
+          {% csrf_token %}
+          <input type="hidden" name="action" value="reject" />
+          <div class="min-w-0 grow">
+            <input type="text" name="reason" required placeholder="Reject reason (required)" class="field-input" />
+          </div>
+          <button type="submit" class="btn-danger-ghost">Reject</button>
+        </form>
+      </div>
+    </div>
   {% endif %}
 
   {% comment %}
