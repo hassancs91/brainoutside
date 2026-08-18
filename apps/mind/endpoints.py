@@ -153,6 +153,64 @@ class GetProtocol(Endpoint):
 
 
 @endpoint(
+    slug="get-skill",
+    description=(
+        "A skill file from the brain — a named protocol (e.g. 'content-writer', "
+        "'mind-reader') that teaches an agent HOW to do a specific task in the "
+        "owner's voice. Load before executing the task."
+    ),
+)
+class GetSkill(Endpoint):
+    class Input(BaseModel):
+        name: str = Field(min_length=1, max_length=100, description="Skill name, e.g. 'content-writer'.")
+
+    class Output(BaseModel):
+        name: str
+        content: str
+        found: bool
+
+    async def run(self, inp: Input, ctx: Ctx) -> Output:
+        return await sync_to_async(self._work, thread_sensitive=True)(inp, ctx)
+
+    def _work(self, inp: Input, ctx: Ctx) -> Output:
+        try:
+            content = files.read_skill(inp.name)
+            emit("read", consumer=_cred(ctx), entity_ids=[f"skill-{inp.name}"], endpoint="get-skill", tier=_tier(ctx), **_via(ctx))
+            return self.Output(name=inp.name, content=content, found=True)
+        except files.SkillMiss:
+            return self.Output(name=inp.name, content="", found=False)
+
+
+class SkillSummary(BaseModel):
+    name: str
+    description: str
+
+
+@endpoint(
+    slug="list-skills",
+    description=(
+        "All available skills in the brain — names and one-line descriptions. "
+        "Use before get-skill to discover what protocols exist."
+    ),
+)
+class ListSkills(Endpoint):
+    class Input(BaseModel):
+        pass
+
+    class Output(BaseModel):
+        count: int
+        skills: list[SkillSummary]
+
+    async def run(self, inp: Input, ctx: Ctx) -> Output:
+        return await sync_to_async(self._work, thread_sensitive=True)(inp, ctx)
+
+    def _work(self, inp: Input, ctx: Ctx) -> Output:
+        skills = files.list_skills()
+        emit("read", consumer=_cred(ctx), entity_ids=["skills-index"], endpoint="list-skills", tier=_tier(ctx), count=len(skills), **_via(ctx))
+        return self.Output(count=len(skills), skills=skills)
+
+
+@endpoint(
     slug="get-index",
     description=(
         "The brain's index, generated for your visibility tier. Read this "
