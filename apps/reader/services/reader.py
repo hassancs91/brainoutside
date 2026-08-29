@@ -1,14 +1,19 @@
 """The smart reader — `assemble-context` (M3.2, PLAN.md §6/§7).
 
-Runs the mind-reader skill (server-mode) over the CALLER-TIER snapshot
-and returns a structured context pack.
+Open and deterministic (see `assembler`): the pack is assembled by
+keyword/relevance scoring over the caller's visible entities, with note
+bodies read only from the caller's tier snapshot. No model, no SDK, no
+key — the consumer brings its own.
 
-Tier safety of the PROMPT itself (grill/§7): CLAUDE.md names private
-projects, so it is never appended here — SKILL.md + server-mode.md carry
-the complete retrieval protocol and contain no tier-gated specifics.
-The agent's working directory is the tier snapshot, so everything else
-it can quote is already filtered. The lens is resolved and inlined in
-trusted code from the caller's own visible entities.
+Tier safety is inherited from the dumb layer: entities are filtered to
+the caller's visibility before selection, and bodies are read through
+`files.read` on the tier snapshot, so nothing above-tier can leak into
+the pack. The lens is resolved and inlined in trusted code from the
+caller's own visible entities.
+
+This module still hosts the reader-side helpers used by the chat
+endpoint (`compose_system_append`, `compose_prompt`), which remains a
+model-backed path — that call still goes through `sdk_runner`.
 """
 from __future__ import annotations
 
@@ -17,7 +22,6 @@ import logging
 from asgiref.sync import sync_to_async
 
 from apps.brain.services import gitrepo
-from apps.reader.services import sdk_runner
 
 log = logging.getLogger(__name__)
 
@@ -143,9 +147,31 @@ def _verify_entities(tier: str, ids: list[str]) -> tuple[list[str], list[str]]:
     return verified, rejected
 
 
+def _visible_entities(tier: str) -> list:
+    """Every Entity the caller's tier may see (same rule as the dumb layer)."""
+    from apps.brain.models import Entity
+    from apps.mind import tiers
+
+    rank = tiers.TIER_ORDER.get(tier, 0)
+    return [e for e in Entity.objects.all() if tiers.TIER_ORDER.get(e.visibility, 2) <= rank]
+
+
+def _read_body(tier: str, entity) -> str:
+    """Read a note body from the caller's tier snapshot (containment held)."""
+    from apps.mind import files
+
+    return files.read(tier, entity.path)
+
+
 async def assemble_context(*, task: str, lens: str = "", tier: str, subject=None) -> dict:
-    """The M3.2 smart read. Raises ReaderError (bad input), ReaderFailed
-    (degraded run), or SdkRunnerError (not configured / daily cap)."""
+    """The M3.2 smart read — open, deterministic, model-free.
+
+    Selects entities over the caller's visible set and reads bodies only
+    from the caller's tier snapshot; the pack is assembled by
+    keyword/relevance scoring, never a model. No SDK, no key, no token/
+    model/latency reporting — the consumer brings its own.
+
+    Raises ReaderError (bad input / unknown lens)."""
     task = (task or "").strip()
     if not task:
         raise ReaderError("task is required")
@@ -154,32 +180,28 @@ async def assemble_context(*, task: str, lens: str = "", tier: str, subject=None
 
     lens_name = (lens or "").strip()
     lens_body = await sync_to_async(_lens_content)(tier, lens_name) if lens_name else ""
-    append = await sync_to_async(compose_system_append)()
 
-    run = await sdk_runner.run_agent_async(
-        kind="reader",
+    from apps.reader.services import assembler
+
+    entities = await sync_to_async(_visible_entities)(tier)
+
+    def read_body(entity) -> str:
+        return _read_body(tier, entity)
+
+    pack = await sync_to_async(assembler.assemble_pack)(
+        task=task,
         tier=tier,
-        prompt=compose_prompt(task, lens_name, lens_body),
-        append_system=append,
-        output_format={"type": "json_schema", "schema": READER_JSON_SCHEMA},
-        subject=subject,
+        entities=entities,
+        lens_name=lens_name,
+        lens_content=lens_body,
+        read_body=read_body,
     )
-    if not run.ok or not isinstance(run.structured_output, dict):
-        raise ReaderFailed(run.error_class or "NoStructuredOutput")
 
-    out = run.structured_output
-    ids = [str(i) for i in (out.get("entity_ids_used") or [])]
+    ids = [str(i) for i in (pack.get("entity_ids_used") or [])]
     verified, rejected = await sync_to_async(_verify_entities)(tier, ids)
     return {
-        "context_pack": str(out.get("context_pack") or ""),
+        "context_pack": str(pack.get("context_pack") or ""),
         "entity_ids_used": verified,
         "unverified_entity_ids": rejected,
-        "gaps": [str(g) for g in (out.get("gaps") or [])],
-        "tokens": {
-            "input": run.usage.get("input_tokens"),
-            "output": run.usage.get("output_tokens"),
-        },
-        "model": run.model,
-        "duration_ms": run.duration_ms,
-        "operation_id": run.operation_id,
+        "gaps": [str(g) for g in (pack.get("gaps") or [])],
     }

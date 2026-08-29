@@ -46,6 +46,7 @@ CONTRACT_PATHS: tuple[str, ...] = (
     ".claude/skills/mind-feeder/server-mode.md",
     ".claude/skills/mind-reader/SKILL.md",
     ".claude/skills/mind-reader/server-mode.md",
+    ".claude/skills/content-writer/SKILL.md",
     "lenses",
     "identity",
     "knowledge",

@@ -41,9 +41,9 @@ def _api_key_or_none(credential):
     slug="propose-feed",
     description=(
         "Propose a new source for the mind (a URL, a transcript, a raw "
-        "thought). Lands in the human approval queue as a pending feed — "
-        "nothing is written to the brain until the operator approves. "
-        "Requires an agents-only key or above."
+        "thought). The ONLY write tool. Lands in the human approval queue "
+        "as a pending feed — nothing is written to the brain until the "
+        "operator approves. Requires an agents-only key or above."
     ),
 )
 class ProposeFeed(Endpoint):
