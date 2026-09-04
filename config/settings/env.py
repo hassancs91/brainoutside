@@ -339,6 +339,20 @@ class Settings(BaseSettings):
         return v
         return v
 
+    @field_validator("SECURITY_TXT_EXPIRES_DAYS", mode="before")
+    @classmethod
+    def _blank_expires_days_is_unset(cls, v: Any) -> Any:
+        """Empty env is unset, not an invalid int.
+
+        `.env.example` used to ship `SECURITY_TXT_EXPIRES_DAYS=` blank, and
+        Coolify injects every compose `${VAR}` as `""`. pydantic-settings
+        treats that as a value, so the `int = 365` default never applies
+        and boot raises `int_parsing`. Blank → the documented default.
+        """
+        if isinstance(v, str) and not v.strip():
+            return 365
+        return v
+
     @model_validator(mode="after")
     def _derive_public_origin(self) -> Settings:
         """Fill `OAUTH_ISSUER` / `PUBLIC_BASE_URL` in from the domain.
