@@ -31,7 +31,7 @@ ENV_EXAMPLE = REPO / ".env.example"
 #: plenty of keys are legitimately blank in the example and defaulted in
 #: code (secrets, hostnames), and this list is not meant to grow into a
 #: full mirror of the settings model.
-MUST_AGREE = ["ADMIN_PANEL_URL_PATH"]
+MUST_AGREE = ["ADMIN_PANEL_URL_PATH", "SECURITY_TXT_EXPIRES_DAYS"]
 
 
 def _example_values() -> dict[str, str]:
@@ -72,6 +72,20 @@ def test_code_default_matches_env_example(key: str) -> None:
         f"operator who copies the example and one who doesn't must land in "
         f"the same place."
     )
+
+
+def test_blank_security_txt_expires_days_uses_the_code_default(monkeypatch) -> None:
+    """Coolify (and a copied `.env` that left the line blank) injects
+    `SECURITY_TXT_EXPIRES_DAYS=""`. pydantic-settings treats that empty
+    string as a value, not unset, so the `int = 365` default never applies
+    and boot raises `int_parsing` — the web container crash-loops on first
+    `./dev.sh up`. Empty must mean the documented 365-day default.
+    """
+    from config.settings.env import Settings
+
+    monkeypatch.setenv("SECURITY_TXT_EXPIRES_DAYS", "")
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.SECURITY_TXT_EXPIRES_DAYS == 365
 
 
 def test_ops_ui_default_is_not_the_most_scanned_path_on_the_web() -> None:
